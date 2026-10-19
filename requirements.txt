@@ -1,0 +1,4 @@
+beautifulsoup4
+playwright
+python-telegram-bot[job-queue]>=22.0
+tzdata
