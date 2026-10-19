@@ -78,13 +78,16 @@ def parse_cards(html: str):
         occupation = None
         nxt = h2.find_next("p", class_="aksel-typo--semibold")
         if nxt and card in nxt.parents:
-            occupation = nxt.get_text(strip=True)
+            t = nxt.get_text(strip=True)
+            # если профессии нет, следующий semibold-абзац - это срок подачи
+            if not t.lower().startswith(("søk senest", "søk snarest", "søknadsfrist")):
+                occupation = t
 
         card_text = card.get_text(" ", strip=True)
         deadline = None
         for p in card.find_all("p"):
             t = p.get_text(" ", strip=True)
-            if t.lower().startswith(("søk senest", "søknadsfrist")):
+            if t.lower().startswith(("søk senest", "søk snarest", "søknadsfrist")):
                 deadline = t
                 break
 
@@ -105,7 +108,7 @@ def parse_cards(html: str):
 
 # ---------------------------------------------------------------- FINN (фаза 2)
 FINN_BASE = "https://www.finn.no"
-FINN_CARD_SEL = "article.job-card-article__card"
+FINN_CARD_SEL = "article.job-card-article__card, article:has(a[href*=\"/job/ad/\"])"
 FINN_LOCATIONS = [
     "2.20001.20009.20150", "2.20001.20009.20151", "2.20001.20009.22106",
     "2.20001.20009.20153", "2.20001.20009.20148", "2.20001.20009.20146",
@@ -123,8 +126,9 @@ def finn_url(page: int = 1) -> str:
 def parse_finn_cards(html: str):
     soup = BeautifulSoup(html, "html.parser")
     jobs, seen = [], set()
-    for card in soup.select(FINN_CARD_SEL):
-        link = card.select_one("a.job-card-link")
+    cards = soup.select(FINN_CARD_SEL) or soup.select("article")
+    for card in cards:
+        link = card.select_one("a.job-card-link") or card.select_one('a[href*="/job/ad/"]')
         if not link:
             continue
         job_id = card.get("id") or link["href"].rstrip("/").rsplit("/", 1)[-1]
@@ -164,21 +168,52 @@ SOURCES = {
 }
 
 
+UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/131.0.0.0 Safari/537.36")
+
+
+def _accept_cookies(page):
+    """Пробуем нажать «Godta alle» (баннер может быть в iframe)."""
+    import re as _re
+    pat = _re.compile(r"godta|aksepter|accept|enig", _re.I)
+    for frame in page.frames:
+        try:
+            frame.get_by_role("button", name=pat).first.click(timeout=2500)
+            page.wait_for_timeout(800)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def fetch_pages(source: str, pages: int):
     from playwright.sync_api import sync_playwright
 
     make_url, wait_sel, parser = SOURCES[source]
     all_jobs = {}
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        browser = p.chromium.launch(
+            headless=True, args=["--disable-blink-features=AutomationControlled"])
+        ctx = browser.new_context(user_agent=UA, locale="nb-NO",
+                                  viewport={"width": 1366, "height": 900})
+        page = ctx.new_page()
         for n in range(1, pages + 1):
-            page.goto(make_url(n), wait_until="networkidle")
+            resp = page.goto(make_url(n), wait_until="domcontentloaded")
+            if n == 1:
+                page.wait_for_timeout(1500)
+                if _accept_cookies(page):
+                    print(f"[{source}] cookie-баннер закрыт")
             try:
                 page.wait_for_selector(wait_sel, timeout=15000)
             except Exception:
-                print(f"[{source}] страница {n}: вакансий нет, остановка")
+                print(f"[{source}] страница {n}: карточек нет "
+                      f"(HTTP {resp.status if resp else '?'}, title={page.title()!r})")
+                page.screenshot(path=f"debug_{source}_p{n}.png", full_page=True)
+                with open(f"debug_{source}_p{n}.html", "w", encoding="utf-8") as f:
+                    f.write(page.content())
+                print(f"[{source}] сохранены debug_{source}_p{n}.png / .html - пришли их мне")
                 break
+            page.wait_for_timeout(800)
             found = parser(page.content())
             new = [j for j in found if j["id"] not in all_jobs]
             for j in new:

@@ -1,0 +1,3 @@
+python arbeidsplassen_parser.py --pages 5 --out jobs                 # обе фазы
+python arbeidsplassen_parser.py --source finn --pages 3 --out jobs   # только FINN
+python arbeidsplassen_parser.py --source nav --pages 3 --out jobs    # только arbeidsplassen
